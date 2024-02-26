@@ -1138,6 +1138,60 @@ test "Cluster: sync: slightly lagging replica" {
     try expectEqual(t.replica(.R_).commit(), checkpoint_1_trigger + 3);
 }
 
+test "Cluster: sync: sync into a newer view" {
+    const t = try TestContext.init(.{ .replica_count = 6 });
+    defer t.deinit();
+
+    var c = t.clients(0, t.cluster.clients.len);
+    try c.request(16, 16);
+    try expectEqual(t.replica(.R_).commit(), 16);
+
+    var a0 = t.replica(.A0);
+    var b1 = t.replica(.B1);
+    var b2 = t.replica(.B2);
+
+    try c.request(checkpoint_1 - 1, checkpoint_1 - 1);
+
+    t.replica(.R_).drop(.R_, .incoming, .prepare);
+    t.replica(.R_).drop(.R_, .incoming, .prepare_ok);
+    t.replica(.R_).drop(.R_, .incoming, .start_view_change);
+
+    b1.pass(.A0, .incoming, .prepare);
+    b1.filter(.A0, .incoming, struct {
+        fn drop_message(message: *Message) bool {
+            switch (message.into_any()) {
+                .prepare => |prepare| {
+                    return (prepare.header.op == checkpoint_1);
+                },
+                else => return false,
+            }
+        }
+    }.drop_message);
+    try c.request(checkpoint_1_trigger + 1, checkpoint_1 - 1);
+    try expectEqual(a0.op_head(), checkpoint_1_trigger - 1);
+    try expectEqual(b1.op_head(), checkpoint_1_trigger - 1);
+    try expectEqual(b2.op_head(), checkpoint_1 - 1);
+
+    try expectEqual(a0.commit(), checkpoint_1 - 1);
+    try expectEqual(b1.commit(), checkpoint_1 - 1);
+    try expectEqual(b2.commit(), checkpoint_1 - 1);
+
+    t.replica(.R_).pass(.R_, .incoming, .prepare);
+    t.replica(.R_).pass(.R_, .incoming, .prepare_ok);
+    t.replica(.R_).pass(.R_, .incoming, .start_view_change);
+
+    a0.drop_all(.R_, .bidirectional);
+    b1.drop_all(.R_, .bidirectional);
+    try c.request(checkpoint_2, checkpoint_2);
+
+    b1.pass_all(.R_, .bidirectional);
+    b1.drop(.R_, .bidirectional, .start_view);
+    b1.drop(.R_, .incoming, .ping);
+    b1.drop(.R_, .incoming, .pong);
+
+    try c.request(checkpoint_2_trigger - 1, checkpoint_2_trigger - 1);
+}
+
 test "Cluster: prepare beyond checkpoint trigger" {
     const t = try TestContext.init(.{ .replica_count = 3 });
     defer t.deinit();
